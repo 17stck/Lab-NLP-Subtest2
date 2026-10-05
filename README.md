@@ -3,7 +3,7 @@
 แชตบอตตอบคำถามเรื่องการปลูกผักสวนครัวในบ้าน ด้วยเทคนิค **Retrieval-Augmented Generation (RAG)**
 ตอบจากคลังเอกสารความรู้เท่านั้น แสดงเอกสารอ้างอิงทุกครั้ง และตอบว่า **"ไม่พบข้อมูลในเอกสาร"** เมื่อเอกสารไม่มีคำตอบ
 
-- **Web App (Streamlit):** `https://lab-nlp-subtest2-htlwtzaphnokdpwbpwnmfv.streamlit.app/?u=92a5a3e4e77e`
+- **Web App (Streamlit):** `<https://lab-nlp-subtest2-htlwtzaphnokdpwbpwnmfv.streamlit.app/?u=92a5a3e4e77e>`
 - **รหัสนักศึกษา / ชื่อ:** 6706022510263 / คมชาญ ทิพโสต
 
 ## แนวคิดของ Domain
