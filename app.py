@@ -3,6 +3,7 @@
 Document Loading & Chunking -> Embedding + FAISS -> Prompt Engineering -> Groq LLM -> Streamlit chat
 """
 import glob
+import html
 import os
 import re
 
@@ -195,59 +196,205 @@ def generate_answer(question: str, contexts: list[dict], history: list[dict]) ->
 
 
 # ----------------------------- UI -----------------------------
-st.set_page_config(page_title="ผู้ช่วยปลูกผักสวนครัว", page_icon="🌱", layout="centered")
-st.title("🌱 ผู้ช่วยปลูกผักสวนครัวในบ้าน")
-st.caption("ถามเรื่องการปลูกผักในบ้านได้เลย — ตอบจากเอกสารความรู้เท่านั้น พร้อมแสดงแหล่งอ้างอิงทุกครั้ง")
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600&family=Prompt:wght@500;600;700&display=swap');
+:root{--leaf:#173B2D;--leaf2:#2F7D4F;--sprout:#9CCB3B;--soil:#6B4A33;--mist:#F5F9F2;
+      --line:#D5E3CB;--chili:#D64045;--ink:#1D2B22;--muted:#5E6F63;--amber:#B7791F;}
+.stApp, .stApp button, .stApp textarea, .stApp input{font-family:'IBM Plex Sans Thai',sans-serif;}
+.stApp{color:var(--ink);}
+[data-testid="stHeader"]{background:transparent;}
+footer{visibility:hidden;}
+.block-container{max-width:860px;padding-top:1.6rem;padding-bottom:6rem;}
 
-with st.sidebar:
-    st.header("⚙️ ตั้งค่า")
-    top_k = st.slider("จำนวนเอกสารที่ดึงมาใช้ (Top-K)", 1, 8, 4)
-    min_score = st.slider("ค่าความคล้ายต่ำสุด (0 = ไม่กรอง)", 0.0, 0.95, 0.0, 0.05)
-    if st.button("🗑️ ล้างการสนทนา", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
-    st.divider()
-    st.subheader("💡 ตัวอย่างคำถาม")
-    for q in EXAMPLE_QUESTIONS:
-        if st.button(q, key=f"ex_{q}", use_container_width=True):
-            st.session_state.pending = q
-    st.divider()
-    st.caption(f"Embedding: {EMBED_MODEL}\n\nLLM: {LLM_MODEL} (Groq)")
+/* ---------- Hero: ซองเมล็ดพันธุ์ ---------- */
+.hero{background:#fff;border:1px solid var(--line);border-radius:6px 6px 22px 22px;overflow:hidden;margin-bottom:1.2rem;}
+.hero-crimp{height:12px;background:repeating-linear-gradient(90deg,var(--leaf) 0 9px,var(--leaf2) 9px 18px);}
+.hero-body{display:flex;gap:1.1rem;align-items:center;padding:1.5rem 1.6rem 0.9rem;}
+.hero-badge{flex:0 0 auto;width:64px;height:64px;border-radius:50%;background:var(--sprout);display:flex;align-items:center;justify-content:center;font-size:2rem;}
+.hero-title{font-family:'Prompt',sans-serif;font-weight:700;font-size:2rem;line-height:1.2;color:var(--leaf);margin:0;}
+.hero-sub{margin:.35rem 0 0;color:var(--muted);font-size:1rem;line-height:1.6;max-width:56ch;}
+.hero-meta{display:flex;flex-wrap:wrap;gap:.5rem;padding:0 1.6rem 1.3rem;}
+.pill{background:var(--mist);border:1px solid var(--line);color:var(--leaf);border-radius:999px;padding:.2rem .8rem;font-size:.85rem;font-weight:500;}
+
+/* ---------- หัวข้อเริ่มต้น ---------- */
+.start-h{font-family:'Prompt',sans-serif;font-weight:600;font-size:1.05rem;color:var(--leaf);margin:1.2rem 0 .6rem;}
+[data-testid="stMain"] .stButton>button{background:#fff;border:1px solid var(--line);border-radius:14px;color:var(--ink);
+  justify-content:flex-start;text-align:left;padding:.85rem 1rem;min-height:4.2rem;width:100%;line-height:1.5;}
+[data-testid="stMain"] .stButton>button:hover{border-color:var(--leaf2);color:var(--leaf);background:#FBFDF9;}
+[data-testid="stMain"] .stButton>button:focus-visible{outline:3px solid var(--sprout);outline-offset:2px;}
+
+/* ---------- ข้อความแชต ---------- */
+[data-testid="stChatMessage"]{background:#fff;border:1px solid var(--line);border-radius:18px;padding:1rem 1.2rem;margin-bottom:.9rem;}
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]){background:#E6F0DA;border-color:#C9DDB5;}
+[data-testid="stChatMessage"] p{line-height:1.75;font-size:1.02rem;}
+.chip{display:inline-block;border-radius:999px;padding:.12rem .75rem;font-size:.8rem;font-weight:600;margin-bottom:.5rem;}
+.chip-ok{background:#E2F2E6;color:#1F6B3B;border:1px solid #BFE0C8;}
+.chip-warn{background:#FFF3DC;color:var(--amber);border:1px solid #F1D79E;}
+
+/* ---------- การ์ดแหล่งอ้างอิง (ป้ายปักกระถาง) ---------- */
+.src{background:var(--mist);border:1px solid var(--line);border-left:5px solid var(--leaf2);border-radius:4px 14px 14px 4px;padding:.8rem 1rem;margin:.55rem 0;}
+.src-head{display:flex;align-items:center;gap:.75rem;}
+.src-n{flex:0 0 auto;width:28px;height:28px;border-radius:50%;background:var(--leaf);color:#fff;font-weight:600;display:flex;align-items:center;justify-content:center;font-size:.9rem;}
+.src-t{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;}
+.src-t b{color:var(--leaf);font-size:.98rem;}
+.src-t small{color:var(--muted);font-size:.78rem;}
+.src-score{flex:0 0 auto;text-align:right;}
+.src-score small{color:var(--muted);font-size:.75rem;}
+.bar{width:84px;height:6px;background:#E1ECD8;border-radius:99px;overflow:hidden;margin-bottom:2px;}
+.bar i{display:block;height:100%;background:var(--sprout);border-radius:99px;}
+.src p{margin:.6rem 0 0;color:#33443A;font-size:.92rem;line-height:1.7;}
+
+/* ---------- ช่องพิมพ์ ---------- */
+[data-testid="stChatInput"]>div{border-radius:26px;border:1.5px solid var(--line);background:#fff;}
+[data-testid="stChatInput"]>div:focus-within{border-color:var(--leaf2);box-shadow:0 0 0 3px rgba(156,203,59,.35);}
+
+/* ---------- Sidebar ---------- */
+[data-testid="stSidebar"]{background:var(--leaf);}
+[data-testid="stSidebar"] *{color:#E4EFDD;}
+[data-testid="stSidebar"] .stButton>button{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.16);border-radius:12px;
+  justify-content:flex-start;text-align:left;padding:.6rem .8rem;line-height:1.5;font-size:.9rem;}
+[data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,.16);border-color:var(--sprout);}
+[data-testid="stSidebar"] .stButton>button:focus-visible{outline:3px solid var(--sprout);outline-offset:2px;}
+[data-testid="stSidebar"] [data-testid="stExpander"]{border:1px solid rgba(255,255,255,.16);border-radius:12px;background:transparent;}
+.brand{display:flex;align-items:center;gap:.7rem;margin:.2rem 0 1.2rem;}
+.brand span{font-size:1.8rem;}
+.brand b{font-family:'Prompt',sans-serif;font-size:1.15rem;color:#fff;display:block;line-height:1.2;}
+.brand small{color:#AFC7A8;font-size:.8rem;}
+.side-h{font-family:'Prompt',sans-serif;font-weight:600;font-size:.95rem;margin:1.1rem 0 .5rem;color:var(--sprout);}
+.side-note{font-size:.75rem;color:#9DB796;line-height:1.6;margin-top:1rem;}
+@media (max-width:640px){.hero-title{font-size:1.5rem}.hero-body{flex-direction:column;align-items:flex-start}}
+"""
+
+st.set_page_config(page_title="ผู้ช่วยปลูกผักสวนครัว", page_icon="🌱", layout="centered",
+                   initial_sidebar_state="expanded")
+st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
+
+_, _, _records = build_index()
+N_DOCS = len({r["source"] for r in _records})
+N_CHUNKS = len(_records)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 
+def set_pending(q: str):
+    st.session_state.pending = q
+
+
+def clear_chat():
+    st.session_state.messages = []
+
+
+def esc(x) -> str:
+    return html.escape(str(x))
+
+
+def status_chip(answer: str) -> str:
+    if answer.startswith("⚠️"):
+        return ""
+    if "ไม่พบข้อมูลในเอกสาร" in answer[:60]:
+        return '<span class="chip chip-warn">ไม่พบข้อมูลในเอกสาร</span>'
+    return '<span class="chip chip-ok">ตอบจากเอกสารอ้างอิง</span>'
+
+
 def render_sources(sources: list[dict]):
-    with st.expander(f"📚 เอกสารอ้างอิงที่ใช้ ({len(sources)} รายการ)"):
+    with st.expander(f"📚 แหล่งอ้างอิง {len(sources)} รายการ"):
         if not sources:
-            st.write("ไม่พบเอกสารที่เกี่ยวข้อง")
+            st.write("ไม่มีเอกสารที่ผ่านเกณฑ์ความคล้ายที่ตั้งไว้")
         for i, s in enumerate(sources, 1):
-            st.markdown(f"**[{i}] {s['title']}**  \n`{s['source']}` · chunk {s['chunk_id']} · คะแนนความคล้าย {s['score']:.3f}")
-            st.write(s["text"])
-            st.divider()
+            pct = max(0, min(100, int((s["score"] - 0.70) / 0.25 * 100)))
+            st.markdown(
+                "".join([
+                    '<div class="src"><div class="src-head">',
+                    f'<span class="src-n">{i}</span>',
+                    f'<div class="src-t"><b>{esc(s["title"])}</b>',
+                    f'<small>{esc(s["source"])} ส่วนที่ {s["chunk_id"]}</small></div>',
+                    f'<div class="src-score"><div class="bar"><i style="width:{pct}%"></i></div>',
+                    f'<small>ความคล้าย {s["score"]:.2f}</small></div></div>',
+                    f'<p>{esc(s["text"])}</p></div>',
+                ]),
+                unsafe_allow_html=True,
+            )
 
 
+# ----- Sidebar -----
+with st.sidebar:
+    st.markdown(
+        '<div class="brand"><span>🌿</span><div><b>สวนครัวในบ้าน</b>'
+        '<small>คู่มือปลูกผักแบบถาม-ตอบ</small></div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="side-h">ลองถามดู</div>', unsafe_allow_html=True)
+    for q in EXAMPLE_QUESTIONS:
+        st.button(q, key=f"ex_{q}", on_click=set_pending, args=(q,), use_container_width=True)
+
+    st.markdown('<div class="side-h">ตั้งค่า</div>', unsafe_allow_html=True)
+    with st.expander("ปรับการค้นหาเอกสาร"):
+        top_k = st.slider("จำนวนแหล่งอ้างอิง (Top-K)", 1, 8, 4)
+        min_score = st.slider("ค่าความคล้ายต่ำสุด (0 = ไม่กรอง)", 0.0, 0.95, 0.0, 0.05)
+    st.button("ล้างการสนทนา", on_click=clear_chat, use_container_width=True)
+    st.markdown(
+        f'<div class="side-note">Embedding: {esc(EMBED_MODEL)}<br>LLM: {esc(LLM_MODEL)} (Groq)</div>',
+        unsafe_allow_html=True,
+    )
+
+# ----- Hero -----
+st.markdown(
+    "".join([
+        '<div class="hero"><div class="hero-crimp"></div><div class="hero-body">',
+        '<div class="hero-badge">🌱</div><div>',
+        '<h1 class="hero-title">ผู้ช่วยปลูกผักสวนครัว</h1>',
+        '<p class="hero-sub">ถามเรื่องแสง ดิน น้ำ ปุ๋ย และโรคแมลง ได้คำตอบจากคู่มือพร้อมแหล่งอ้างอิง '
+        'ถ้าในคู่มือไม่มีข้อมูล ระบบจะบอกตรง ๆ</p></div></div>',
+        f'<div class="hero-meta"><span class="pill">คู่มือ {N_DOCS} เรื่อง</span>',
+        f'<span class="pill">{N_CHUNKS} ส่วนความรู้</span>',
+        '<span class="pill">ภาษาไทยและอังกฤษ</span></div></div>',
+    ]),
+    unsafe_allow_html=True,
+)
+
+# ----- หน้าเริ่มต้น (ยังไม่มีการสนทนา) -----
+STARTERS = [
+    ("☀️", "ปลูกผักในกระถางต้องการแดดวันละกี่ชั่วโมง?"),
+    ("🪴", "สูตรดินผสมสำหรับปลูกผักในกระถางคืออะไร?"),
+    ("💧", "ควรรดน้ำผักวันละกี่ครั้ง ช่วงไหนดีที่สุด?"),
+    ("🐛", "กำจัดเพลี้ยอ่อนแบบไม่ใช้สารเคมีทำอย่างไร?"),
+    ("🌿", "ใบกะเพราเหลืองเกิดจากอะไร?"),
+    ("♻️", "ทำปุ๋ยหมักจากเศษอาหารอย่างไร?"),
+]
+if not st.session_state.messages and "pending" not in st.session_state:
+    st.markdown('<div class="start-h">เริ่มจากคำถามยอดนิยม</div>', unsafe_allow_html=True)
+    cols = st.columns(2)
+    for idx, (icon, q) in enumerate(STARTERS):
+        with cols[idx % 2]:
+            st.button(f"{icon}  {q}", key=f"st_{idx}", on_click=set_pending, args=(q,))
+
+# ----- ประวัติแชต -----
 for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
+    avatar = "🧑‍🌾" if m["role"] == "user" else "🌱"
+    with st.chat_message(m["role"], avatar=avatar):
+        if m["role"] == "assistant":
+            st.markdown(status_chip(m["content"]), unsafe_allow_html=True)
         st.markdown(m["content"])
         if m["role"] == "assistant":
             render_sources(m.get("sources", []))
 
-question = st.chat_input("พิมพ์คำถามเกี่ยวกับการปลูกผัก...")
+# ----- รับคำถามใหม่ -----
+question = st.chat_input("ถามเรื่องผัก เช่น ใบกะเพราเหลืองเกิดจากอะไร?")
 if not question and "pending" in st.session_state:
     question = st.session_state.pop("pending")
 
 if question:
     history = list(st.session_state.messages)
     st.session_state.messages.append({"role": "user", "content": question})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar="🧑‍🌾"):
         st.markdown(question)
 
-    with st.chat_message("assistant"):
-        with st.spinner("กำลังค้นหาและเรียบเรียงคำตอบ..."):
+    with st.chat_message("assistant", avatar="🌱"):
+        with st.spinner("กำลังเปิดคู่มือและเรียบเรียงคำตอบ..."):
             ctxs = retrieve(build_retrieval_query(question, history), top_k, min_score)
             answer = generate_answer(question, ctxs, history)
+        st.markdown(status_chip(answer), unsafe_allow_html=True)
         st.markdown(answer)
         render_sources(ctxs)
 
