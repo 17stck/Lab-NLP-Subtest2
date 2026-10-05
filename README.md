@@ -1,2 +1,78 @@
-# Lab-NLP-Subtest2
-for lab-nlp-subtest2
+# 🌱 ผู้ช่วยปลูกผักสวนครัวในบ้าน (RAG Chatbot)
+
+แชตบอตตอบคำถามเรื่องการปลูกผักสวนครัวในบ้าน ด้วยเทคนิค **Retrieval-Augmented Generation (RAG)**
+ตอบจากคลังเอกสารความรู้เท่านั้น แสดงเอกสารอ้างอิงทุกครั้ง และตอบว่า **"ไม่พบข้อมูลในเอกสาร"** เมื่อเอกสารไม่มีคำตอบ
+
+- **Web App (Streamlit):** `<ใส่ URL ที่ Deploy>`
+- **รหัสนักศึกษา / ชื่อ:** 6706022510263 / คมชาญ ทิพโสต
+
+## แนวคิดของ Domain
+การปลูกผักกินเองในบ้าน/คอนโด/ระเบียง เป็นหัวข้อที่คนทั่วไปสนใจ แต่ข้อมูลกระจัดกระจายและมักตอบยากว่า
+"ต้องรดน้ำเท่าไร ปุ๋ยสูตรไหน ใบเหลืองเพราะอะไร" ระบบนี้รวมความรู้ไว้ที่เดียว
+ให้ถามเป็นภาษาธรรมชาติและได้คำตอบที่ตรวจสอบย้อนกลับถึงเอกสารต้นทางได้
+
+## สถาปัตยกรรม
+```
+data/*.txt ─► clean (pythainlp.normalize) ─► chunk (ย่อหน้า/ประโยค ≤450 ตัวอักษร + overlap)
+          ─► Embedding (intfloat/multilingual-e5-small) ─► FAISS IndexFlatIP (cosine)
+คำถาม ─► query embedding ─► Top-K chunks ─► Prompt (กฎ + context + ประวัติสนทนา) ─► Groq LLM ─► คำตอบ + อ้างอิง [n]
+```
+| เทคนิค | การใช้งานในโปรเจกต์ |
+|---|---|
+| Document Loading & Chunking | โหลด `.txt` ทำความสะอาดข้อความ แบ่งตามย่อหน้า/ประโยค (pythainlp) พร้อม overlap |
+| Embedding & Vector Search | `multilingual-e5-small` (ไทย/อังกฤษ, ขนาดเล็ก) + FAISS |
+| Prompt Engineering | ตอบจาก context เท่านั้น, ใส่เลขอ้างอิง [n], ถ้าไม่มีข้อมูลให้ตอบ "ไม่พบข้อมูลในเอกสาร" |
+| LLM | Groq API (`llama-3.3-70b-versatile`) temperature 0.1 |
+| Chatbot Interface | `st.chat_message`, จำประวัติสนทนา, expander แสดงเอกสารอ้างอิงพร้อมคะแนนความคล้าย |
+
+## โครงสร้างไฟล์
+```
+app.py              # Streamlit app หลัก
+requirements.txt    # ไลบรารีที่ใช้
+README.md
+test_questions.csv  # คำถามทดสอบ 13 ข้อ (มี 3 ข้อที่ไม่มีคำตอบในเอกสาร)
+data/               # เอกสารความรู้ 11 ไฟล์ (~17,000 ตัวอักษร)
+.streamlit/secrets.toml.example
+.gitignore          # กัน secrets.toml ไม่ให้ขึ้น GitHub
+```
+
+## วิธีรันบนเครื่อง
+```bash
+pip install -r requirements.txt
+mkdir -p .streamlit
+echo 'GROQ_API_KEY = "gsk_xxx"' > .streamlit/secrets.toml   # ไฟล์นี้อยู่ใน .gitignore แล้ว
+streamlit run app.py
+```
+ขอ API Key ฟรีได้ที่ https://console.groq.com
+
+## วิธี Deploy บน Streamlit Community Cloud
+1. Push โค้ดขึ้น GitHub (**ห้าม** มี API Key ในโค้ด/ไฟล์ใด ๆ)
+2. เข้า https://share.streamlit.io → New app → เลือก repo, branch, ไฟล์ `app.py`
+3. Advanced settings → **Secrets** แล้ววาง
+   ```toml
+   GROQ_API_KEY = "gsk_xxxxxxxx"
+   ```
+4. Deploy แล้วทดสอบเปิด URL ในโหมด Incognito
+
+## แหล่งที่มาของเอกสาร
+เอกสารใน `data/` เรียบเรียงโดยใช้ AI (Claude) จากความรู้ทั่วไปด้านการเกษตรและพืชสวนครัวของไทย
+เพื่อใช้ในการเรียนการสอนวิชา NLP ตัวเลข เช่น อัตราปุ๋ย/จำนวนวันเก็บเกี่ยว เป็นค่าโดยประมาณ
+ควรตรวจสอบกับแหล่งข้อมูลทางการเกษตรก่อนนำไปใช้จริง
+
+## ตัวอย่าง Prompt ที่ใช้สั่ง AI
+**1) สร้างระบบ**
+> ช่วยเขียน Streamlit RAG chatbot ภาษาไทย ใช้ sentence-transformers (multilingual-e5-small) + FAISS + Groq API
+> โหลดไฟล์ .txt จากโฟลเดอร์ data/ แบ่ง chunk ด้วย pythainlp เก็บ API Key ใน st.secrets
+> หน้าแชตต้องจำประวัติและแสดงเอกสารอ้างอิงทุกคำตอบ
+
+**2) สร้างเอกสารความรู้**
+> เขียนเอกสารความรู้ภาษาไทยเรื่อง "ปุ๋ยสำหรับผักสวนครัว" ประมาณ 1,500 ตัวอักษร
+> ให้ข้อมูลเป็นตัวเลขชัดเจน (อัตราส่วน ระยะเวลา) เพื่อใช้ทดสอบ RAG
+
+**3) System Prompt ในแอป**
+> ตอบจากเอกสารอ้างอิงที่ให้มาเท่านั้น ห้ามเดา ใส่เลขอ้างอิง [1],[2] ต่อท้ายข้อเท็จจริง
+> หากไม่มีข้อมูลให้ตอบว่า "ไม่พบข้อมูลในเอกสาร"
+
+## การทดสอบ
+`test_questions.csv` มีคำถาม 13 ข้อ: 10 ข้อมีคำตอบในเอกสาร (`answerable=yes`) และ 3 ข้อไม่มีคำตอบ (`answerable=no`)
+เพื่อทดสอบว่าระบบปฏิเสธได้ถูกต้อง
