@@ -1,6 +1,6 @@
 """
 🌱 ผู้ช่วยปลูกผักสวนครัวในบ้าน — RAG Chatbot
-Document Loading & Chunking -> Embedding + FAISS -> Prompt Engineering -> Groq LLM -> Streamlit chat
+Document Loading & Chunking -> Embedding + FAISS -> Prompt Engineering -> Gemini -> Streamlit chat
 """
 import glob
 import html
@@ -14,7 +14,7 @@ import uuid
 import faiss
 import numpy as np
 import streamlit as st
-from groq import Groq
+from google import genai
 from pythainlp.util import normalize
 from sentence_transformers import SentenceTransformer
 
@@ -22,8 +22,7 @@ from sentence_transformers import SentenceTransformer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 EMBED_MODEL = "intfloat/multilingual-e5-small"  # โมเดลเล็ก รองรับไทย/อังกฤษ
-LLM_MODEL = "openai/gpt-oss-120b"                # โมเดลหลักบน Groq
-FALLBACK_MODELS = ["openai/gpt-oss-20b", "llama-3.1-8b-instant"]  # สลับอัตโนมัติถ้าโมเดลหลักใช้ไม่ได้
+LLM_MODEL = "gemini-3.8-flash"
 CHUNK_SIZE = 450       # จำนวนตัวอักษรสูงสุดต่อ chunk
 CHUNK_OVERLAP = 120    # หน่วยข้อความท้าย chunk ที่ยกไปซ้อนกับ chunk ถัดไป
 HISTORY_TURNS = 6      # จำนวนข้อความย้อนหลังที่ส่งให้ LLM
@@ -36,28 +35,43 @@ EXAMPLE_QUESTIONS = [
     "ราคาเมล็ดพันธุ์คะน้าซองละเท่าไร?",
 ]
 
-SYSTEM_PROMPT = """คุณคือ "ผู้ช่วยปลูกผักสวนครัว" ที่ตอบคำถามโดยอิงจากเอกสารความรู้ที่ให้มาเท่านั้น
+EXAMPLE_QUESTIONS_EN = [
+    "How many hours of sunlight do vegetables in pots need each day?",
+    "How long does Chinese water spinach take to harvest?",
+    "Why are my holy basil leaves turning yellow?",
+    "How can I make compost from kitchen scraps?",
+    "How much does a packet of Chinese kale seeds cost?",
+]
 
-กฎที่ต้องปฏิบัติอย่างเคร่งครัด:
-1. ตอบจาก "เอกสารอ้างอิง" ที่ให้มาเท่านั้น ห้ามใช้ความรู้นอกเอกสาร ห้ามเดาหรือแต่งข้อมูลเพิ่ม
-2. ทุกประโยคที่เป็นข้อเท็จจริงต้องมีเลขอ้างอิงในรูปแบบ [1], [2] ต่อท้าย ตรงกับหมายเลขของเอกสารที่ใช้
-3. หากเอกสารไม่มีข้อมูลที่ตอบคำถามได้ ให้ตอบว่า "ไม่พบข้อมูลในเอกสาร" พร้อมอธิบายสั้น ๆ ว่าเอกสารครอบคลุมเรื่องใดบ้าง และห้ามอ้างอิงเลขเอกสาร
-4. หากคำถามต่อเนื่องจากบทสนทนาก่อนหน้า ให้ใช้ประวัติการสนทนาเพื่อเข้าใจบริบท แต่ข้อเท็จจริงต้องมาจากเอกสารอ้างอิงเท่านั้น
-5. ตอบเป็นภาษาเดียวกับผู้ใช้ กระชับ เป็นขั้นตอน เข้าใจง่าย
+SYSTEM_PROMPT = """You are a home vegetable gardening assistant. Answer using only the supplied reference documents.
+
+Rules:
+1. Do not use outside knowledge or invent facts.
+2. Add source-number citations such as [1] or [2] to every factual statement.
+3. If the documents do not answer the question, say so in the requested language and do not add citations.
+4. Use conversation history only to understand follow-up questions; factual claims must still come from the documents.
+5. Keep the answer concise, clear, and step-by-step when appropriate.
 """
 
 
 # ----------------------------- โหลด + ทำความสะอาด + แบ่ง chunk -----------------------------
 def clean_text(text: str) -> str:
-    text = normalize(text)                       # จัดระเบียบสระ/วรรณยุกต์ซ้ำของภาษาไทย
+    text = normalize(text)
     text = text.replace("\u200b", "").replace("\r", "")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
+def detect_language(text: str) -> str:
+    """Choose Thai or English based on the script used most in the latest question."""
+    thai_letters = len(re.findall(r"[\u0e00-\u0e7f]", text))
+    latin_letters = len(re.findall(r"[A-Za-z]", text))
+    return "th" if thai_letters >= latin_letters else "en"
+
+
 def split_long(unit: str, size: int) -> list[str]:
-    """ตัดย่อหน้ายาวเป็นประโยค (ใช้ pythainlp) แล้วตัดแข็งถ้ายังยาวเกิน"""
+    """Split long paragraphs into sentences, then into bounded chunks."""
     try:
         from pythainlp.tokenize import sent_tokenize
         parts = sent_tokenize(unit, engine="crfcut")
@@ -92,9 +106,8 @@ def chunk_document(text: str) -> tuple[str, list[str]]:
     for u in units:
         if current and len(current) + len(u) + 1 > CHUNK_SIZE:
             chunks.append(current)
-            # overlap: ยกหน่วยสุดท้ายไปซ้อน ถ้าไม่ยาวเกินไป
-            last = current.split(" ")[-1] if " " in current else ""
-            carry = last if 0 < len(last) <= CHUNK_OVERLAP else ""
+            carry_size = min(CHUNK_OVERLAP, max(0, CHUNK_SIZE - len(u) - 1))
+            carry = current[-carry_size:] if carry_size else ""
             current = (carry + " " + u).strip()
         else:
             current = (current + " " + u).strip()
@@ -103,7 +116,7 @@ def chunk_document(text: str) -> tuple[str, list[str]]:
     return title, chunks
 
 
-@st.cache_resource(show_spinner="กำลังโหลดเอกสารและสร้างดัชนี (ครั้งแรกอาจใช้เวลาสักครู่)...")
+@st.cache_resource
 def build_index():
     """โหลดโมเดล + เอกสาร + FAISS index เพียงครั้งเดียว"""
     model = SentenceTransformer(EMBED_MODEL)
@@ -120,7 +133,10 @@ def build_index():
                 "text": c,
             })
     if not records:
-        raise RuntimeError("ไม่พบไฟล์ .txt ในโฟลเดอร์ data/")
+        raise RuntimeError(tr(
+            "ไม่พบไฟล์ .txt ในโฟลเดอร์ data/",
+            "No .txt files were found in the data/ folder.",
+        ))
 
     # e5 ต้องใส่ prefix "passage: " ; แนบหัวข้อเพื่อช่วยให้ค้นหาแม่นขึ้น
     passages = [f"passage: {r['title']} — {r['text']}" for r in records]
@@ -161,46 +177,74 @@ def build_retrieval_query(question: str, history: list[dict]) -> str:
 
 # ----------------------------- LLM -----------------------------
 def get_api_key() -> str | None:
+    key = (
+        os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip()
+    )
+    if key:
+        return key
+
     try:
-        return st.secrets["GROQ_API_KEY"]
-    except Exception:
-        return os.environ.get("GROQ_API_KEY")
+        key = st.secrets.get("GEMINI_API_KEY", "") or st.secrets.get("GOOGLE_API_KEY", "")
+    except FileNotFoundError:
+        return None
+    return key.strip() or None
 
 
-def generate_answer(question: str, contexts: list[dict], history: list[dict]) -> str:
+def generate_answer(
+    question: str,
+    contexts: list[dict],
+    history: list[dict],
+    language: str,
+) -> str:
     key = get_api_key()
     if not key:
-        return "⚠️ ยังไม่ได้ตั้งค่า GROQ_API_KEY ใน Secrets ของ Streamlit"
+        if language == "en":
+            return "⚠️ GEMINI_API_KEY is not configured. Add it to Streamlit Secrets or the environment."
+        return "⚠️ ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Streamlit Secrets หรือ environment"
+    if not contexts:
+        if language == "en":
+            return "No information found in the documents."
+        return "ไม่พบข้อมูลในเอกสาร"
 
-    if contexts:
-        ctx_text = "\n\n".join(
-            f"[{i}] (ไฟล์: {c['source']} | หัวข้อ: {c['title']})\n{c['text']}"
-            for i, c in enumerate(contexts, 1)
+    ctx_text = "\n\n".join(
+        f"[{i}] (file: {c['source']} | topic: {c['title']})\n{c['text']}"
+        for i, c in enumerate(contexts, 1)
+    )
+
+    history_text = "\n".join(
+        f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+        for m in history[-HISTORY_TURNS:]
+    )
+    user_msg = (
+        f"Reference documents:\n{ctx_text}\n\n"
+        f"Recent conversation:\n{history_text or '(none)'}\n\n"
+        f"Question: {question}\n\nAnswer using the system rules."
+    )
+    language_instruction = (
+        'Answer in English only. If the answer is not in the references, say exactly "No information found in the documents."'
+        if language == "en"
+        else 'ตอบเป็นภาษาไทยเท่านั้น หากไม่มีคำตอบในเอกสาร ให้พูดว่า "ไม่พบข้อมูลในเอกสาร"'
+    )
+    try:
+        client = genai.Client(api_key=key)
+        response = client.interactions.create(
+            model=LLM_MODEL,
+            input=user_msg,
+            system_instruction=f"{SYSTEM_PROMPT}\n{language_instruction}",
+            generation_config={"temperature": 0.1, "max_output_tokens": 2500},
+            store=False,
         )
-    else:
-        ctx_text = "(ไม่พบเอกสารที่เกี่ยวข้อง)"
-
-    user_msg = f"เอกสารอ้างอิง:\n{ctx_text}\n\nคำถาม: {question}\n\nตอบตามกฎที่กำหนด:"
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in history[-HISTORY_TURNS:]:
-        messages.append({"role": m["role"], "content": m["content"]})
-    messages.append({"role": "user", "content": user_msg})
-
-    client = Groq(api_key=key)
-    last_err = None
-    for model_name in [LLM_MODEL] + FALLBACK_MODELS:
-        try:
-            kwargs = dict(model=model_name, messages=messages, temperature=0.1, max_tokens=2500)
-            if model_name.startswith("openai/gpt-oss"):
-                kwargs["extra_body"] = {"reasoning_effort": "low"}  # ลดเวลา/โทเคนที่ใช้คิด
-            resp = client.chat.completions.create(**kwargs)
-            text = (resp.choices[0].message.content or "").strip()
-            if text:
-                return text
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            continue
-    return f"⚠️ เรียก LLM ไม่สำเร็จ: {last_err}"
+        text = (response.output_text or "").strip()
+        if text:
+            return text
+        if language == "en":
+            return "⚠️ Gemini returned an empty response. Please try again."
+        return "⚠️ Gemini ไม่ได้ส่งคำตอบกลับมา กรุณาลองใหม่อีกครั้ง"
+    except Exception as e:
+        if language == "en":
+            return f"⚠️ Gemini request failed: {e}"
+        return f"⚠️ เรียก Gemini ไม่สำเร็จ: {e}"
 
 
 # ----------------------------- UI -----------------------------
@@ -208,7 +252,7 @@ CSS = """
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600&family=Prompt:wght@500;600;700&display=swap');
 :root{--leaf:#173B2D;--leaf2:#2F7D4F;--sprout:#9CCB3B;--mist:#F5F9F2;--side:#EAF1E4;
       --line:#D5E3CB;--ink:#1D2B22;--muted:#5E6F63;--amber:#B7791F;}
-.stApp, .stApp button, .stApp textarea, .stApp input{font-family:'IBM Plex Sans Thai',sans-serif;}
+.stApp, .stApp button, .stApp textarea, .stApp input{font-family:'IBM Plex Sans Thai','Noto Sans Thai',Tahoma,sans-serif;}
 .stApp{color:var(--ink);}
 [data-testid="stHeader"]{background:transparent;}
 footer{visibility:hidden;}
@@ -282,16 +326,58 @@ footer{visibility:hidden;}
 @media (max-width:640px){.hero-title{font-size:1.5rem}.hero-body{flex-direction:column;align-items:flex-start}}
 """
 
-st.set_page_config(page_title="ผู้ช่วยปลูกผักสวนครัว", page_icon="🌱", layout="centered",
+st.set_page_config(page_title="Home Vegetable Garden | สวนครัวในบ้าน", page_icon="🌱", layout="centered",
                    initial_sidebar_state="expanded")
+ui_language = st.sidebar.selectbox(
+    "ภาษาหน้าเว็บ / Interface language",
+    options=["ไทย", "English"],
+    index=0,
+    key="ui_language",
+)
+
+
+def tr(thai: str, english: str) -> str:
+    return english if ui_language == "English" else thai
+
+
+S = st.session_state
 st.markdown(f"<style>{CSS}</style>", unsafe_allow_html=True)
 
-_, _, _records = build_index()
+with st.spinner(tr("กำลังโหลดคู่มือและสร้างดัชนี (ครั้งแรกอาจใช้เวลาสักครู่)...",
+                   "Loading the guides and building the search index (this may take a moment the first time)...")):
+    _, _, _records = build_index()
 DOC_TITLES: dict[str, str] = {}
 for _r in _records:
     DOC_TITLES.setdefault(_r["source"], _r["title"])
+DOC_TITLES_EN = {
+    "01_intro_and_planning.txt": "Introduction and Planning",
+    "02_soil_and_potting_mix.txt": "Soil and Potting Mix",
+    "03_watering.txt": "Watering",
+    "04_fertilizer.txt": "Fertilizer",
+    "05_pests_and_diseases.txt": "Pests and Diseases",
+    "06_herbs_basil_chili.txt": "Herbs: Basil and Chili",
+    "07_leafy_vegetables.txt": "Leafy Vegetables",
+    "08_sprouts_microgreens.txt": "Sprouts and Microgreens",
+    "09_compost_eco_enzyme.txt": "Compost and Eco-Enzyme",
+    "10_seasons_troubleshooting.txt": "Seasons and Troubleshooting",
+    "11_balcony_hydroponics_seeds.txt": "Balcony Gardening, Hydroponics, and Seeds",
+}
 N_DOCS, N_CHUNKS = len(DOC_TITLES), len(_records)
-S = st.session_state
+
+
+def display_doc_title(source: str) -> str:
+    if ui_language == "English":
+        return DOC_TITLES_EN.get(source, DOC_TITLES.get(source, source))
+    return DOC_TITLES.get(source, source)
+
+
+def display_project_name(name: str) -> str:
+    return tr("ทั่วไป", "General") if name == "ทั่วไป" else name
+
+
+def display_chat_title(title: str) -> str:
+    return tr("แชตใหม่", "New chat") if title == "แชตใหม่" else title
+
 
 # ----------------------------- สถานะ: โปรเจกต์ / แชต -----------------------------
 def esc(x) -> str:
@@ -385,17 +471,23 @@ def save_history():
         os.makedirs(os.path.dirname(HIST_FILE), exist_ok=True)
         with open(HIST_FILE, "w", encoding="utf-8") as f:
             json.dump({"projects": S.projects, "chats": S.chats, "active": S.active}, f, ensure_ascii=False)
-    except Exception:  # noqa: BLE001
-        pass  # บันทึกไม่ได้ก็ไม่ให้แอปล้ม
+    except OSError as e:
+        st.warning(tr(f"บันทึกประวัติแชตไม่สำเร็จ: {e}",
+                      f"Could not save chat history: {e}"))
 
 
 def load_history():
     try:
         with open(HIST_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("projects"), dict) or not isinstance(data.get("chats"), dict):
+            raise ValueError("รูปแบบไฟล์ประวัติไม่ถูกต้อง")
         S.projects, S.chats, S.active = data["projects"], data["chats"], data.get("active")
-    except Exception:  # noqa: BLE001
-        pass
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        st.warning(tr(f"โหลดประวัติแชตไม่สำเร็จ: {e}",
+                      f"Could not load chat history: {e}"))
 
 
 def heal_state():
@@ -435,25 +527,33 @@ def import_history(up):
 def status_chip(answer: str) -> str:
     if answer.startswith("⚠️"):
         return ""
-    if "ไม่พบข้อมูลในเอกสาร" in answer[:60]:
-        return '<span class="chip chip-warn">ไม่พบข้อมูลในเอกสาร</span>'
-    return '<span class="chip chip-ok">ตอบจากเอกสารอ้างอิง</span>'
+    no_info_markers = (
+        "ไม่พบข้อมูลในเอกสาร",
+        "no information found",
+        "the documents do not contain",
+        "not found in the documents",
+    )
+    if any(marker in answer[:120].lower() for marker in no_info_markers):
+        return f'<span class="chip chip-warn">{tr("ไม่พบข้อมูลในเอกสาร", "No information found in the documents")}</span>'
+    return f'<span class="chip chip-ok">{tr("ตอบจากเอกสารอ้างอิง", "Answered from reference documents")}</span>'
 
 
 def render_sources(sources: list[dict]):
-    with st.expander(f"📚 แหล่งอ้างอิง {len(sources)} รายการ"):
+    with st.expander(tr(f"📚 แหล่งอ้างอิง {len(sources)} รายการ", f"📚 {len(sources)} references")):
+        if ui_language == "English":
+            st.caption("Reference excerpts are shown in their original language (Thai).")
         if not sources:
-            st.write("ไม่มีเอกสารที่ผ่านเกณฑ์ที่ตั้งไว้")
+            st.write(tr("ไม่มีเอกสารที่ผ่านเกณฑ์ที่ตั้งไว้", "No documents passed the selected threshold."))
         for i, s_ in enumerate(sources, 1):
             pct = max(0, min(100, int((s_["score"] - 0.70) / 0.25 * 100)))
             st.markdown(
                 "".join([
                     '<div class="src"><div class="src-head">',
                     f'<span class="src-n">{i}</span>',
-                    f'<div class="src-t"><b>{esc(s_["title"])}</b>',
-                    f'<small>{esc(s_["source"])} ส่วนที่ {s_["chunk_id"]}</small></div>',
+                    f'<div class="src-t"><b>{esc(display_doc_title(s_["source"]))}</b>',
+                    f'<small>{esc(s_["source"])} {tr("ส่วนที่", "chunk")} {s_["chunk_id"]}</small></div>',
                     f'<div class="src-score"><div class="bar"><i style="width:{pct}%"></i></div>',
-                    f'<small>ความคล้าย {s_["score"]:.2f}</small></div></div>',
+                    f'<small>{tr("ความคล้าย", "Similarity")} {s_["score"]:.2f}</small></div></div>',
                     f'<p>{esc(s_["text"])}</p></div>',
                 ]),
                 unsafe_allow_html=True,
@@ -467,9 +567,9 @@ def short(t: str, n: int = 27) -> str:
 def chat_button(cid: str, prefix: str):
     active = cid == S.active
     st.button(
-        short(S.chats[cid]["title"]),
+        short(display_chat_title(S.chats[cid]["title"])),
         key=f"{'act' if active else 'chat'}_{prefix}_{cid}",
-        on_click=set_active, args=(cid,), use_container_width=True,
+        on_click=set_active, args=(cid,), width="stretch",
     )
 
 
@@ -477,64 +577,78 @@ def chat_button(cid: str, prefix: str):
 active_chat = S.chats[S.active]
 with st.sidebar:
     st.markdown(
-        '<div class="brand"><span>🌿</span><div><b>สวนครัวในบ้าน</b>'
-        '<small>คู่มือปลูกผักแบบถาม-ตอบ</small></div></div>',
+        f'<div class="brand"><span>🌿</span><div><b>{tr("สวนครัวในบ้าน", "Home Vegetable Garden")}</b>'
+        f'<small>{tr("คู่มือปลูกผักแบบถาม-ตอบ", "Your gardening guide")}</small></div></div>',
         unsafe_allow_html=True,
     )
-    st.button("＋  แชตใหม่", key="newchat", on_click=new_chat,
-              args=(active_chat["project"],), use_container_width=True)
+    st.button(tr("＋  แชตใหม่", "＋  New chat"), key="newchat", on_click=new_chat,
+              args=(active_chat["project"],), width="stretch")
 
     recent = sorted([c for c in S.chats if S.chats[c]["messages"]],
                     key=lambda c: -S.chats[c]["ts"])[:5]
     if recent:
-        st.markdown('<div class="side-h">ล่าสุด</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="side-h">{tr("ล่าสุด", "Recent")}</div>', unsafe_allow_html=True)
         for cid in recent:
             chat_button(cid, "rc")
 
-    st.markdown('<div class="side-h">โปรเจกต์</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="side-h">{tr("โปรเจกต์", "Projects")}</div>', unsafe_allow_html=True)
     for pid, p in list(S.projects.items()):
         in_proj = sorted([c for c in S.chats if S.chats[c]["project"] == pid],
                          key=lambda c: -S.chats[c]["ts"])
-        with st.expander(f"📁 {p['name']} ({len(in_proj)})", expanded=(active_chat["project"] == pid)):
-            st.button("＋ แชตใหม่ในโปรเจกต์นี้", key=f"np_{pid}", on_click=new_chat,
-                      args=(pid,), use_container_width=True)
+        with st.expander(f"📁 {display_project_name(p['name'])} ({len(in_proj)} {tr('แชต', 'chats')})", expanded=(active_chat["project"] == pid)):
+            st.button(tr("＋ แชตใหม่ในโปรเจกต์นี้", "＋ New chat in this project"), key=f"np_{pid}", on_click=new_chat,
+                      args=(pid,), width="stretch")
             for cid in in_proj:
                 chat_button(cid, "pj")
-            with st.popover("⚙️ ตั้งค่าโปรเจกต์", use_container_width=True):
-                st.text_input("ชื่อโปรเจกต์", value=p["name"], key=f"pn_{pid}")
-                st.multiselect("จำกัดเอกสารที่ค้นหา (ว่าง = ทุกเรื่อง)", options=list(DOC_TITLES),
-                               default=[d for d in p["docs"] if d in DOC_TITLES],
-                               format_func=lambda x: DOC_TITLES[x], key=f"pd_{pid}")
-                st.button("บันทึก", key=f"ps_{pid}", on_click=save_project, args=(pid,))
+            with st.popover(tr("⚙️ ตั้งค่าโปรเจกต์", "⚙️ Project settings"), width="stretch"):
+                st.text_input(tr("ชื่อโปรเจกต์", "Project name"), value=p["name"], key=f"pn_{pid}")
+                st.multiselect(
+                    tr("จำกัดเอกสารที่ค้นหา (ว่าง = ทุกเรื่อง)", "Limit search to documents (empty = all)"),
+                    options=list(DOC_TITLES),
+                    default=[d for d in p["docs"] if d in DOC_TITLES],
+                    format_func=display_doc_title,
+                    key=f"pd_{pid}",
+                )
+                st.button(tr("บันทึก", "Save"), key=f"ps_{pid}", on_click=save_project, args=(pid,))
                 if len(S.projects) > 1:
-                    st.button("🗑️ ลบโปรเจกต์ (แชตจะย้ายไปโปรเจกต์อื่น)", key=f"pdel_{pid}",
+                    st.button(tr("🗑️ ลบโปรเจกต์ (แชตจะย้ายไปโปรเจกต์อื่น)", "🗑️ Delete project (chats will be moved)"), key=f"pdel_{pid}",
                               on_click=delete_project, args=(pid,))
                 else:
-                    st.caption("ต้องมีอย่างน้อย 1 โปรเจกต์ สร้างโปรเจกต์ใหม่ก่อนจึงจะลบอันนี้ได้")
+                    st.caption(tr("ต้องมีอย่างน้อย 1 โปรเจกต์ สร้างโปรเจกต์ใหม่ก่อนจึงจะลบอันนี้ได้",
+                                  "At least one project is required. Create another before deleting this one."))
 
-    with st.expander("＋ โปรเจกต์ใหม่"):
-        st.text_input("ชื่อโปรเจกต์", key="np_name", placeholder="เช่น ปลูกกะเพราและพริก")
-        st.multiselect("จำกัดเอกสารที่ค้นหา (ว่าง = ทุกเรื่อง)", options=list(DOC_TITLES),
-                       format_func=lambda x: DOC_TITLES[x], key="np_docs")
-        st.button("สร้างโปรเจกต์", key="np_create", on_click=create_project)
-
-    st.markdown('<div class="side-h">ลองถามดู</div>', unsafe_allow_html=True)
-    with st.expander("ตัวอย่างคำถาม"):
-        for q in EXAMPLE_QUESTIONS:
-            st.button(q, key=f"ex_{q}", on_click=set_pending, args=(q,), use_container_width=True)
-
-    st.markdown('<div class="side-h">ตั้งค่า</div>', unsafe_allow_html=True)
-    with st.expander("ปรับการค้นหาเอกสาร"):
-        top_k = st.slider("จำนวนแหล่งอ้างอิง (Top-K)", 1, 8, 4)
-        min_score = st.slider("ค่าความคล้ายต่ำสุด (0 = ไม่กรอง)", 0.0, 0.95, 0.0, 0.05)
-    with st.expander("สำรอง / นำเข้าประวัติ"):
-        st.caption("ประวัติผูกกับลิงก์ที่มี ?u=... ต่อท้าย บุ๊กมาร์กลิงก์นี้ไว้เพื่อกลับมาดูแชตเดิม (ถ้าแอปถูกรีสตาร์ต ประวัติอาจหาย จึงควรกดสำรองเป็นไฟล์ไว้ด้วย)")
-        st.download_button(
-            "⬇️ สำรองประวัติ (.json)",
-            data=json.dumps({"projects": S.projects, "chats": S.chats}, ensure_ascii=False, indent=1),
-            file_name="chat_history.json", mime="application/json", use_container_width=True,
+    with st.expander(tr("＋ โปรเจกต์ใหม่", "＋ New project")):
+        st.text_input(tr("ชื่อโปรเจกต์", "Project name"), key="np_name",
+                      placeholder=tr("เช่น ปลูกกะเพราและพริก", "e.g. Basil and chili"))
+        st.multiselect(
+            tr("จำกัดเอกสารที่ค้นหา (ว่าง = ทุกเรื่อง)", "Limit search to documents (empty = all)"),
+            options=list(DOC_TITLES),
+            format_func=display_doc_title,
+            key="np_docs",
         )
-        up = st.file_uploader("นำเข้าประวัติ (.json)", type="json", key="imp")
+        st.button(tr("สร้างโปรเจกต์", "Create project"), key="np_create", on_click=create_project)
+
+    st.markdown(f'<div class="side-h">{tr("ลองถามดู", "Try asking")}</div>', unsafe_allow_html=True)
+    with st.expander(tr("ตัวอย่างคำถาม", "Example questions")):
+        questions = EXAMPLE_QUESTIONS if ui_language == "ไทย" else EXAMPLE_QUESTIONS_EN
+        for q in questions:
+            st.button(q, key=f"ex_{q}", on_click=set_pending, args=(q,), width="stretch")
+
+    st.markdown(f'<div class="side-h">{tr("ตั้งค่า", "Settings")}</div>', unsafe_allow_html=True)
+    with st.expander(tr("ปรับการค้นหาเอกสาร", "Search settings")):
+        top_k = st.slider(tr("จำนวนแหล่งอ้างอิง (Top-K)", "Number of references (Top-K)"), 1, 8, 4)
+        min_score = st.slider(tr("ค่าความคล้ายต่ำสุด (0 = ไม่กรอง)", "Minimum similarity (0 = no filter)"), 0.0, 0.95, 0.0, 0.05)
+    with st.expander(tr("สำรอง / นำเข้าประวัติ", "Export / import chat history")):
+        st.caption(tr(
+            "ประวัติผูกกับลิงก์ที่มี ?u=... ต่อท้าย บุ๊กมาร์กลิงก์นี้ไว้เพื่อกลับมาดูแชตเดิม (ถ้าแอปถูกรีสตาร์ต ประวัติอาจหาย จึงควรกดสำรองเป็นไฟล์ไว้ด้วย)",
+            "Chat history is linked to the ?u=... URL. Bookmark the link to return to it. Server restarts may clear history, so download a backup.",
+        ))
+        st.download_button(
+            tr("⬇️ สำรองประวัติ (.json)", "⬇️ Download history (.json)"),
+            data=json.dumps({"projects": S.projects, "chats": S.chats}, ensure_ascii=False, indent=1),
+            file_name="chat_history.json", mime="application/json", width="stretch",
+        )
+        up = st.file_uploader(tr("นำเข้าประวัติ (.json)", "Import history (.json)"), type="json", key="imp")
         if up is not None:
             fid = getattr(up, "file_id", f"{up.name}-{up.size}")
             if S.get("imp_id") != fid:
@@ -543,9 +657,11 @@ with st.sidebar:
                     S.imp_id = fid
                     st.rerun()
                 except Exception:  # noqa: BLE001
-                    st.error("ไฟล์ไม่ถูกต้อง นำเข้าไม่สำเร็จ")
+                    st.error(tr("ไฟล์ไม่ถูกต้อง นำเข้าไม่สำเร็จ",
+                                "Invalid file. Could not import chat history."))
     st.markdown(
-        f'<div class="side-note">Embedding: {esc(EMBED_MODEL)}<br>LLM: {esc(LLM_MODEL)} (Groq)</div>',
+        f'<div class="side-note">Embedding: {esc(EMBED_MODEL)}<br>AI: Google Gemini ({esc(LLM_MODEL)})<br>'
+        f'{tr("ภาษาคำตอบปรับตามภาษาคำถาม", "Answers follow the language of your question")}</div>',
         unsafe_allow_html=True,
     )
 
@@ -559,23 +675,33 @@ scope = [d for d in proj["docs"] if d in DOC_TITLES]
 
 top_l, top_r = st.columns([6, 1.3], vertical_alignment="center")
 with top_l:
-    st.markdown(f'<div class="crumb">📁 {esc(proj["name"])}<span>/</span>{esc(chat["title"])}</div>',
+    st.markdown(f'<div class="crumb">📁 {esc(display_project_name(proj["name"]))}<span>/</span>{esc(display_chat_title(chat["title"]))}</div>',
                 unsafe_allow_html=True)
 with top_r:
-    with st.popover("⋯ จัดการ", use_container_width=True):
-        st.text_input("ชื่อแชต", value=chat["title"], key=f"rn_{cid}")
-        st.button("บันทึกชื่อ", key=f"rnb_{cid}", on_click=rename_chat, args=(cid,))
-        st.selectbox("ย้ายไปโปรเจกต์", options=list(S.projects), index=list(S.projects).index(chat["project"]),
-                     format_func=lambda x: S.projects[x]["name"], key=f"mv_{cid}",
+    with st.popover(tr("⋯ จัดการ", "⋯ Manage"), width="stretch"):
+        st.text_input(tr("ชื่อแชต", "Chat name"), value=chat["title"], key=f"rn_{cid}")
+        st.button(tr("บันทึกชื่อ", "Save name"), key=f"rnb_{cid}", on_click=rename_chat, args=(cid,))
+        st.selectbox(tr("ย้ายไปโปรเจกต์", "Move to project"), options=list(S.projects), index=list(S.projects).index(chat["project"]),
+                     format_func=lambda x: display_project_name(S.projects[x]["name"]), key=f"mv_{cid}",
                      on_change=move_chat, args=(cid,))
-        st.button("🗑️ ลบแชตนี้", key=f"del_{cid}", on_click=delete_chat, args=(cid,))
+        st.button(tr("🗑️ ลบแชตนี้", "🗑️ Delete this chat"), key=f"del_{cid}", on_click=delete_chat, args=(cid,))
 
 if scope:
-    names = ", ".join(DOC_TITLES[d] for d in scope[:2]) + (f" และอีก {len(scope) - 2} เรื่อง" if len(scope) > 2 else "")
-    st.markdown(f'<div class="scope">ค้นหาจาก <b>{len(scope)} เรื่อง</b> ที่โปรเจกต์เลือกไว้: {esc(names)}</div>',
-                unsafe_allow_html=True)
+    names = ", ".join(display_doc_title(d) for d in scope[:2]) + (
+        tr(f" และอีก {len(scope) - 2} เรื่อง", f" and {len(scope) - 2} more")
+        if len(scope) > 2 else ""
+    )
+    st.markdown(
+        f'<div class="scope">{tr("ค้นหาจาก", "Searching")} <b>{len(scope)} '
+        f'{tr("เรื่อง", "topics")}</b> {tr("ที่โปรเจกต์เลือกไว้", "selected for this project")}: {esc(names)}</div>',
+        unsafe_allow_html=True,
+    )
 else:
-    st.markdown(f'<div class="scope">ค้นหาจากคู่มือ <b>ทุกเรื่อง</b> ({N_DOCS} เอกสาร)</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="scope">{tr("ค้นหาจากคู่มือ", "Searching all")} '
+        f'<b>{tr("ทุกเรื่อง", "topics")}</b> ({N_DOCS} {tr("เอกสาร", "documents")})</div>',
+        unsafe_allow_html=True,
+    )
 
 STARTERS = [
     ("☀️", "ปลูกผักในกระถางต้องการแดดวันละกี่ชั่วโมง?"),
@@ -585,23 +711,32 @@ STARTERS = [
     ("🌿", "ใบกะเพราเหลืองเกิดจากอะไร?"),
     ("♻️", "ทำปุ๋ยหมักจากเศษอาหารอย่างไร?"),
 ]
+STARTERS_EN = [
+    ("☀️", "How many hours of sunlight do vegetables in pots need?"),
+    ("🪴", "What is a good potting mix for vegetables?"),
+    ("💧", "How often and when should I water vegetables?"),
+    ("🐛", "How can I control aphids without chemicals?"),
+    ("🌿", "Why are my holy basil leaves turning yellow?"),
+    ("♻️", "How can I make compost from kitchen scraps?"),
+]
 if not chat["messages"] and "pending" not in S:
+    starters = STARTERS if ui_language == "ไทย" else STARTERS_EN
     st.markdown(
         "".join([
             '<div class="hero"><div class="hero-crimp"></div><div class="hero-body">',
             '<div class="hero-badge">🌱</div><div>',
-            '<h1 class="hero-title">ผู้ช่วยปลูกผักสวนครัว</h1>',
-            '<p class="hero-sub">ถามเรื่องแสง ดิน น้ำ ปุ๋ย และโรคแมลง ได้คำตอบจากคู่มือพร้อมแหล่งอ้างอิง '
-            'ถ้าในคู่มือไม่มีข้อมูล ระบบจะบอกตรง ๆ</p></div></div>',
-            f'<div class="hero-meta"><span class="pill">คู่มือ {N_DOCS} เรื่อง</span>',
-            f'<span class="pill">{N_CHUNKS} ส่วนความรู้</span>',
-            '<span class="pill">ภาษาไทยและอังกฤษ</span></div></div>',
+            f'<h1 class="hero-title">{tr("ผู้ช่วยปลูกผักสวนครัว", "Home Vegetable Gardening Assistant")}</h1>',
+            f'<p class="hero-sub">{tr("ถามเรื่องแสง ดิน น้ำ ปุ๋ย และโรคแมลง ได้คำตอบจากคู่มือพร้อมแหล่งอ้างอิง ถ้าในคู่มือไม่มีข้อมูล ระบบจะบอกตรง ๆ", "Ask about sunlight, soil, watering, fertilizer, pests, and diseases. Answers cite the guides, and the assistant will say when information is unavailable.")}</p></div></div>',
+            f'<div class="hero-meta"><span class="pill">{tr("คู่มือ", "Guides")} {N_DOCS} {tr("เรื่อง", "topics")}</span>',
+            f'<span class="pill">{N_CHUNKS} {tr("ส่วนความรู้", "knowledge chunks")}</span>',
+            f'<span class="pill">{tr("ภาษาไทยและอังกฤษ", "Thai and English")}</span></div></div>',
         ]),
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="start-h">เริ่มจากคำถามยอดนิยม</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="start-h">{tr("เริ่มจากคำถามยอดนิยม", "Start with a popular question")}</div>',
+                unsafe_allow_html=True)
     cols = st.columns(2)
-    for idx, (icon, q) in enumerate(STARTERS):
+    for idx, (icon, q) in enumerate(starters):
         with cols[idx % 2]:
             st.button(f"{icon}  {q}", key=f"st_{idx}", on_click=set_pending, args=(q,))
 
@@ -614,7 +749,10 @@ for m in chat["messages"]:
         if m["role"] == "assistant":
             render_sources(m.get("sources", []))
 
-question = st.chat_input("ถามเรื่องผัก เช่น ใบกะเพราเหลืองเกิดจากอะไร?")
+question = st.chat_input(tr(
+    "ถามเรื่องผัก เช่น ใบกะเพราเหลืองเกิดจากอะไร?",
+    "Ask about gardening, e.g. Why are my basil leaves turning yellow?",
+))
 if not question and "pending" in S:
     question = S.pop("pending")
 
@@ -628,9 +766,11 @@ if question:
         st.markdown(question)
 
     with st.chat_message("assistant", avatar="🌱"):
-        with st.spinner("กำลังเปิดคู่มือและเรียบเรียงคำตอบ..."):
+        with st.spinner(tr("กำลังเปิดคู่มือและเรียบเรียงคำตอบ...",
+                           "Searching the guides and preparing an answer...")):
+            language = detect_language(question)
             ctxs = retrieve(build_retrieval_query(question, history), top_k, min_score, scope or None)
-            answer = generate_answer(question, ctxs, history)
+            answer = generate_answer(question, ctxs, history, language)
         st.markdown(status_chip(answer), unsafe_allow_html=True)
         st.markdown(answer)
         render_sources(ctxs)

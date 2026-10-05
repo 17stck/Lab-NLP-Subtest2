@@ -3,6 +3,6 @@ torch
 streamlit
 sentence-transformers
 faiss-cpu
-groq
+google-genai>=1.0.0
 pythainlp
 numpy

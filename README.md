@@ -1,84 +1,42 @@
-# 🌱 ผู้ช่วยปลูกผักสวนครัวในบ้าน (RAG Chatbot)
+# ผู้ช่วยปลูกผักสวนครัว
 
-แชตบอตตอบคำถามเรื่องการปลูกผักสวนครัวในบ้าน ด้วยเทคนิค **Retrieval-Augmented Generation (RAG)**
-ตอบจากคลังเอกสารความรู้เท่านั้น แสดงเอกสารอ้างอิงทุกครั้ง และตอบว่า **"ไม่พบข้อมูลในเอกสาร"** เมื่อเอกสารไม่มีคำตอบ
+เว็บแอปถาม-ตอบเรื่องปลูกผัก โดยค้นข้อมูลจากไฟล์ใน `data/` และใช้ Google Gemini API จาก Google AI Studio เรียบเรียงคำตอบ
+รองรับหน้าจอภาษาไทยและ English (เลือกภาษาได้จากแถบด้านข้าง) และตอบกลับเป็นภาษาที่ใช้ถาม
+คู่มืออ้างอิงต้นฉบับเป็นภาษาไทย แม้ถามเป็นภาษาอังกฤษคำตอบจะเป็นภาษาอังกฤษ
 
-- **Web App (Streamlit):** https://lab-nlp-subtest2-htlwtzaphnokdpwbpwnmfv.streamlit.app/?u=92a5a3e4e77e
-- **รหัสนักศึกษา / ชื่อ:** 6706022510263 / คมชาญ ทิพโสต
+Home gardening Q&A app with Thai/English interface and answers. Responses follow the
+language of the question; source guides are currently written in Thai.
 
-## แนวคิดของ Domain
-การปลูกผักกินเองในบ้าน/คอนโด/ระเบียง เป็นหัวข้อที่คนทั่วไปสนใจ แต่ข้อมูลกระจัดกระจายและมักตอบยากว่า
-"ต้องรดน้ำเท่าไร ปุ๋ยสูตรไหน ใบเหลืองเพราะอะไร" ระบบนี้รวมความรู้ไว้ที่เดียว
-ให้ถามเป็นภาษาธรรมชาติและได้คำตอบที่ตรวจสอบย้อนกลับถึงเอกสารต้นทางได้
+## เริ่มใช้งานในเครื่อง
 
-## สถาปัตยกรรม
-```
-data/*.txt ─► clean (pythainlp.normalize) ─► chunk (ย่อหน้า/ประโยค ≤450 ตัวอักษร + overlap)
-          ─► Embedding (intfloat/multilingual-e5-small) ─► FAISS IndexFlatIP (cosine)
-คำถาม ─► query embedding ─► Top-K chunks ─► Prompt (กฎ + context + ประวัติสนทนา) ─► Groq LLM ─► คำตอบ + อ้างอิง [n]
-```
-| เทคนิค | การใช้งานในโปรเจกต์ |
-|---|---|
-| Document Loading & Chunking | โหลด `.txt` ทำความสะอาดข้อความ แบ่งตามย่อหน้า/ประโยค (pythainlp) พร้อม overlap |
-| Embedding & Vector Search | `multilingual-e5-small` (ไทย/อังกฤษ, ขนาดเล็ก) + FAISS |
-| Prompt Engineering | ตอบจาก context เท่านั้น, ใส่เลขอ้างอิง [n], ถ้าไม่มีข้อมูลให้ตอบ "ไม่พบข้อมูลในเอกสาร" |
-| LLM | Groq API (`openai/gpt-oss-120b`) temperature 0.1 |
-| Chatbot Interface | `st.chat_message`, จำประวัติสนทนา, expander แสดงเอกสารอ้างอิงพร้อมคะแนนความคล้าย |
+ติดตั้งแพ็กเกจ:
 
-## ฟีเจอร์หน้าเว็บ
-- **แชตใหม่ / ล่าสุด:** สร้างแชตหลายห้อง ตั้งชื่ออัตโนมัติจากคำถามแรก เปลี่ยนชื่อ ย้าย หรือลบได้
-- **โปรเจกต์:** จัดกลุ่มแชตเป็นโฟลเดอร์ และเลือกจำกัดเอกสารที่ใช้ค้นหาในแต่ละโปรเจกต์ (เช่น โปรเจกต์ "ปลูกกะเพรา" ค้นเฉพาะไฟล์สมุนไพร)
-- **ประวัติข้ามการรีเฟรช:** ผูกกับรหัสใน URL (`?u=...`) เก็บเป็นไฟล์ฝั่งเซิร์ฟเวอร์ บุ๊กมาร์กลิงก์เพื่อกลับมาดูแชตเดิม (ถ้าแอปรีสตาร์ต ประวัติอาจหาย)
-- **สำรอง/นำเข้าประวัติ:** ดาวน์โหลดประวัติเป็น `.json` แล้วนำเข้าใหม่ได้
-
-## โครงสร้างไฟล์
-```
-app.py              # Streamlit app หลัก
-requirements.txt    # ไลบรารีที่ใช้
-README.md
-test_questions.csv  # คำถามทดสอบ 13 ข้อ (มี 3 ข้อที่ไม่มีคำตอบในเอกสาร)
-data/               # เอกสารความรู้ 11 ไฟล์ (~17,000 ตัวอักษร)
-.streamlit/secrets.toml.example
-.gitignore          # กัน secrets.toml ไม่ให้ขึ้น GitHub
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## วิธีรันบนเครื่อง
-```bash
-pip install -r requirements.txt
-mkdir -p .streamlit
-echo 'GROQ_API_KEY = "gsk_xxx"' > .streamlit/secrets.toml   # ไฟล์นี้อยู่ใน .gitignore แล้ว
-streamlit run app.py
-```
-ขอ API Key ฟรีได้ที่ https://console.groq.com
+ตั้งค่า Google AI Studio API key ใน PowerShell ก่อนเปิดแอป:
 
-## วิธี Deploy บน Streamlit Community Cloud
-1. Push โค้ดขึ้น GitHub (**ห้าม** มี API Key ในโค้ด/ไฟล์ใด ๆ)
-2. เข้า https://share.streamlit.io → New app → เลือก repo, branch, ไฟล์ `app.py`
-3. Advanced settings → **Secrets** แล้ววาง
+```powershell
+$env:GEMINI_API_KEY = "ใส่ API key ของคุณ"
+.\.venv\Scripts\streamlit.exe run app.py
+```
+
+หรือเพิ่ม `GEMINI_API_KEY = "..."` ใน `.streamlit/secrets.toml` โดยห้าม commit ไฟล์ secrets
+สร้าง API key ได้จาก [Google AI Studio](https://aistudio.google.com/app/apikey)
+
+## Deploy ให้เข้าจากอินเทอร์เน็ต
+
+1. Push โค้ดขึ้น GitHub โดยให้มี `app.py`, `requirements.txt` และโฟลเดอร์ `data/`
+2. สร้างแอปใหม่ที่ [Streamlit Community Cloud](https://share.streamlit.io/) โดยเลือก repository, branch และ `app.py`
+3. ในหน้า App settings → Secrets เพิ่ม:
+
    ```toml
-   GROQ_API_KEY = "gsk_xxxxxxxx"
+   GEMINI_API_KEY = "ใส่ API key จาก Google AI Studio"
    ```
-4. Deploy แล้วทดสอบเปิด URL ในโหมด Incognito
 
-## แหล่งที่มาของเอกสาร
-เอกสารใน `data/` เรียบเรียงโดยใช้ AI (Claude) จากความรู้ทั่วไปด้านการเกษตรและพืชสวนครัวของไทย
-เพื่อใช้ในการเรียนการสอนวิชา NLP ตัวเลข เช่น อัตราปุ๋ย/จำนวนวันเก็บเกี่ยว เป็นค่าโดยประมาณ
-ควรตรวจสอบกับแหล่งข้อมูลทางการเกษตรก่อนนำไปใช้จริง
+4. กด Deploy แล้วใช้ URL `https://<ชื่อแอป>.streamlit.app` ที่ระบบสร้างให้
 
-## ตัวอย่าง Prompt ที่ใช้สั่ง AI
-**1) สร้างระบบ**
-> ช่วยเขียน Streamlit RAG chatbot ภาษาไทย ใช้ sentence-transformers (multilingual-e5-small) + FAISS + Groq API
-> โหลดไฟล์ .txt จากโฟลเดอร์ data/ แบ่ง chunk ด้วย pythainlp เก็บ API Key ใน st.secrets
-> หน้าแชตต้องจำประวัติและแสดงเอกสารอ้างอิงทุกคำตอบ
-
-**2) สร้างเอกสารความรู้**
-> เขียนเอกสารความรู้ภาษาไทยเรื่อง "ปุ๋ยสำหรับผักสวนครัว" ประมาณ 1,500 ตัวอักษร
-> ให้ข้อมูลเป็นตัวเลขชัดเจน (อัตราส่วน ระยะเวลา) เพื่อใช้ทดสอบ RAG
-
-**3) System Prompt ในแอป**
-> ตอบจากเอกสารอ้างอิงที่ให้มาเท่านั้น ห้ามเดา ใส่เลขอ้างอิง [1],[2] ต่อท้ายข้อเท็จจริง
-> หากไม่มีข้อมูลให้ตอบว่า "ไม่พบข้อมูลในเอกสาร"
-
-## การทดสอบ
-`test_questions.csv` มีคำถาม 13 ข้อ: 10 ข้อมีคำตอบในเอกสาร (`answerable=yes`) และ 3 ข้อไม่มีคำตอบ (`answerable=no`)
-เพื่อทดสอบว่าระบบปฏิเสธได้ถูกต้อง
+ห้ามใส่ API key ใน source code หรือ commit `.streamlit/secrets.toml` ขึ้น GitHub
+การ Deploy แบบสาธารณะทำให้ผู้ที่มีลิงก์เรียกใช้ API quota ของเจ้าของ key ได้
+ครั้งแรกแอปจะดาวน์โหลด embedding model จาก Hugging Face และสร้างดัชนีจากเอกสารใน `data/`
