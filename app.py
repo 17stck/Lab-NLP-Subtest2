@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
 
@@ -357,11 +358,58 @@ def set_pending(q: str):
     S.pending = q
 
 
+# ----- เก็บประวัติข้ามการรีเฟรช: ผูกกับรหัสใน URL (?u=...) และเก็บเป็นไฟล์ฝั่งเซิร์ฟเวอร์ -----
+def _get_user_id() -> str:
+    u = st.query_params.get("u", "")
+    if not re.fullmatch(r"[a-f0-9]{12}", str(u)):
+        u = uuid.uuid4().hex[:12]
+        st.query_params["u"] = u
+    return u
+
+
+USER_ID = _get_user_id()
+HIST_FILE = os.path.join(tempfile.gettempdir(), "rag_garden_history", f"{USER_ID}.json")
+
+
+def save_history():
+    try:
+        os.makedirs(os.path.dirname(HIST_FILE), exist_ok=True)
+        with open(HIST_FILE, "w", encoding="utf-8") as f:
+            json.dump({"projects": S.projects, "chats": S.chats, "active": S.active}, f, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass  # บันทึกไม่ได้ก็ไม่ให้แอปล้ม
+
+
+def load_history():
+    try:
+        with open(HIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        S.projects, S.chats, S.active = data["projects"], data["chats"], data.get("active")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def heal_state():
+    """ซ่อมข้อมูลที่ผิดปกติ เช่น แชตชี้ไปโปรเจกต์ที่ถูกลบ ไม่ให้แอปล้ม"""
+    S.projects.setdefault("general", {"name": "ทั่วไป", "docs": []})
+    for c in S.chats.values():
+        if c.get("project") not in S.projects:
+            c["project"] = "general"
+        c.setdefault("messages", [])
+        c.setdefault("title", "แชตใหม่")
+        c.setdefault("ts", time.time())
+    if S.get("active") not in S.chats:
+        S.active = max(S.chats, key=lambda c: S.chats[c]["ts"]) if S.chats else None
+    if S.active is None:
+        new_chat("general")
+
+
 if "projects" not in S:
     S.projects = {"general": {"name": "ทั่วไป", "docs": []}}
     S.chats = {}
     S.active = None
-    new_chat("general")
+    load_history()
+heal_state()
 
 
 def import_history(up):
@@ -471,7 +519,7 @@ with st.sidebar:
         top_k = st.slider("จำนวนแหล่งอ้างอิง (Top-K)", 1, 8, 4)
         min_score = st.slider("ค่าความคล้ายต่ำสุด (0 = ไม่กรอง)", 0.0, 0.95, 0.0, 0.05)
     with st.expander("สำรอง / นำเข้าประวัติ"):
-        st.caption("ประวัติแชตเก็บในเซสชันนี้เท่านั้น ถ้ารีเฟรชหน้าจะหาย กดสำรองไว้แล้วนำเข้าใหม่ได้")
+        st.caption("ประวัติผูกกับลิงก์ที่มี ?u=... ต่อท้าย บุ๊กมาร์กลิงก์นี้ไว้เพื่อกลับมาดูแชตเดิม (ถ้าแอปถูกรีสตาร์ต ประวัติอาจหาย จึงควรกดสำรองเป็นไฟล์ไว้ด้วย)")
         st.download_button(
             "⬇️ สำรองประวัติ (.json)",
             data=json.dumps({"projects": S.projects, "chats": S.chats}, ensure_ascii=False, indent=1),
@@ -493,6 +541,8 @@ with st.sidebar:
     )
 
 # ----------------------------- หน้าหลัก -----------------------------
+heal_state()
+save_history()
 cid = S.active
 chat = S.chats[cid]
 proj = S.projects[chat["project"]]
@@ -577,4 +627,5 @@ if question:
         render_sources(ctxs)
 
     chat["messages"].append({"role": "assistant", "content": answer, "sources": ctxs})
+    save_history()
     st.rerun()  # รีเฟรชแถบข้างให้ชื่อแชตและรายการล่าสุดอัปเดตทันที
