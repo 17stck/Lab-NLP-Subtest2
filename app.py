@@ -17,7 +17,8 @@ from sentence_transformers import SentenceTransformer
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 EMBED_MODEL = "intfloat/multilingual-e5-small"  # โมเดลเล็ก รองรับไทย/อังกฤษ
-LLM_MODEL = "llama-3.3-70b-versatile"            # โมเดลบน Groq
+LLM_MODEL = "openai/gpt-oss-120b"                # โมเดลหลักบน Groq
+FALLBACK_MODELS = ["openai/gpt-oss-20b", "llama-3.1-8b-instant"]  # สลับอัตโนมัติถ้าโมเดลหลักใช้ไม่ได้
 CHUNK_SIZE = 450       # จำนวนตัวอักษรสูงสุดต่อ chunk
 CHUNK_OVERLAP = 120    # หน่วยข้อความท้าย chunk ที่ยกไปซ้อนกับ chunk ถัดไป
 HISTORY_TURNS = 6      # จำนวนข้อความย้อนหลังที่ส่งให้ LLM
@@ -176,14 +177,21 @@ def generate_answer(question: str, contexts: list[dict], history: list[dict]) ->
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": user_msg})
 
-    try:
-        client = Groq(api_key=key)
-        resp = client.chat.completions.create(
-            model=LLM_MODEL, messages=messages, temperature=0.1, max_tokens=800
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:  # noqa: BLE001
-        return f"⚠️ เรียก LLM ไม่สำเร็จ: {e}"
+    client = Groq(api_key=key)
+    last_err = None
+    for model_name in [LLM_MODEL] + FALLBACK_MODELS:
+        try:
+            kwargs = dict(model=model_name, messages=messages, temperature=0.1, max_tokens=2500)
+            if model_name.startswith("openai/gpt-oss"):
+                kwargs["extra_body"] = {"reasoning_effort": "low"}  # ลดเวลา/โทเคนที่ใช้คิด
+            resp = client.chat.completions.create(**kwargs)
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+    return f"⚠️ เรียก LLM ไม่สำเร็จ: {last_err}"
 
 
 # ----------------------------- UI -----------------------------

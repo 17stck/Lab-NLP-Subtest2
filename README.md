@@ -22,7 +22,7 @@ data/*.txt ─► clean (pythainlp.normalize) ─► chunk (ย่อหน้�
 | Document Loading & Chunking | โหลด `.txt` ทำความสะอาดข้อความ แบ่งตามย่อหน้า/ประโยค (pythainlp) พร้อม overlap |
 | Embedding & Vector Search | `multilingual-e5-small` (ไทย/อังกฤษ, ขนาดเล็ก) + FAISS |
 | Prompt Engineering | ตอบจาก context เท่านั้น, ใส่เลขอ้างอิง [n], ถ้าไม่มีข้อมูลให้ตอบ "ไม่พบข้อมูลในเอกสาร" |
-| LLM | Groq API (`llama-3.3-70b-versatile`) temperature 0.1 |
+| LLM | Groq API (`openai/gpt-oss-120b`) temperature 0.1 |
 | Chatbot Interface | `st.chat_message`, จำประวัติสนทนา, expander แสดงเอกสารอ้างอิงพร้อมคะแนนความคล้าย |
 
 ## โครงสร้างไฟล์
