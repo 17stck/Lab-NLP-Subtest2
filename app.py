@@ -298,7 +298,15 @@ def esc(x) -> str:
     return html.escape(str(x))
 
 
-def new_chat(project_id: str = "general"):
+def default_pid() -> str:
+    """โปรเจกต์ปลายทางเริ่มต้น: 'general' ถ้ามี ไม่งั้นใช้อันแรก"""
+    if "general" in S.projects:
+        return "general"
+    return next(iter(S.projects))
+
+
+def new_chat(project_id: str | None = None):
+    project_id = project_id if project_id in S.projects else default_pid()
     cur = S.chats.get(S.get("active"))
     if cur and not cur["messages"] and cur["project"] == project_id:
         return  # แชตว่างอยู่แล้ว ไม่ต้องสร้างซ้ำ
@@ -317,7 +325,7 @@ def delete_chat(cid: str):
         if S.chats:
             S.active = max(S.chats, key=lambda c: S.chats[c]["ts"])
         else:
-            new_chat("general")
+            new_chat(default_pid())
 
 
 def rename_chat(cid: str):
@@ -346,12 +354,13 @@ def save_project(pid: str):
 
 
 def delete_project(pid: str):
-    if pid == "general":
-        return
+    if len(S.projects) <= 1 or pid not in S.projects:
+        return  # ต้องเหลืออย่างน้อย 1 โปรเจกต์
+    S.projects.pop(pid)
+    target = default_pid()
     for c in S.chats.values():
         if c["project"] == pid:
-            c["project"] = "general"
-    S.projects.pop(pid, None)
+            c["project"] = target
 
 
 def set_pending(q: str):
@@ -391,17 +400,18 @@ def load_history():
 
 def heal_state():
     """ซ่อมข้อมูลที่ผิดปกติ เช่น แชตชี้ไปโปรเจกต์ที่ถูกลบ ไม่ให้แอปล้ม"""
-    S.projects.setdefault("general", {"name": "ทั่วไป", "docs": []})
+    if not S.projects:
+        S.projects["general"] = {"name": "ทั่วไป", "docs": []}
     for c in S.chats.values():
         if c.get("project") not in S.projects:
-            c["project"] = "general"
+            c["project"] = default_pid()
         c.setdefault("messages", [])
         c.setdefault("title", "แชตใหม่")
         c.setdefault("ts", time.time())
     if S.get("active") not in S.chats:
         S.active = max(S.chats, key=lambda c: S.chats[c]["ts"]) if S.chats else None
     if S.active is None:
-        new_chat("general")
+        new_chat(default_pid())
 
 
 if "projects" not in S:
@@ -415,14 +425,11 @@ heal_state()
 def import_history(up):
     data = json.load(up)
     projects, chats = data["projects"], data["chats"]
-    projects.setdefault("general", {"name": "ทั่วไป", "docs": []})
-    for c in chats.values():
-        if c.get("project") not in projects:
-            c["project"] = "general"
+    if not projects:
+        projects["general"] = {"name": "ทั่วไป", "docs": []}
     S.projects, S.chats = projects, chats
     S.active = max(chats, key=lambda c: chats[c]["ts"]) if chats else None
-    if S.active is None:
-        new_chat("general")
+    heal_state()
 
 
 def status_chip(answer: str) -> str:
@@ -499,9 +506,11 @@ with st.sidebar:
                                default=[d for d in p["docs"] if d in DOC_TITLES],
                                format_func=lambda x: DOC_TITLES[x], key=f"pd_{pid}")
                 st.button("บันทึก", key=f"ps_{pid}", on_click=save_project, args=(pid,))
-                if pid != "general":
-                    st.button("ลบโปรเจกต์ (แชตจะย้ายไป 'ทั่วไป')", key=f"pdel_{pid}",
+                if len(S.projects) > 1:
+                    st.button("🗑️ ลบโปรเจกต์ (แชตจะย้ายไปโปรเจกต์อื่น)", key=f"pdel_{pid}",
                               on_click=delete_project, args=(pid,))
+                else:
+                    st.caption("ต้องมีอย่างน้อย 1 โปรเจกต์ สร้างโปรเจกต์ใหม่ก่อนจึงจะลบอันนี้ได้")
 
     with st.expander("＋ โปรเจกต์ใหม่"):
         st.text_input("ชื่อโปรเจกต์", key="np_name", placeholder="เช่น ปลูกกะเพราและพริก")
